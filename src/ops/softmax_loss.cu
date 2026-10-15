@@ -1,106 +1,85 @@
+// src/loss.cu
 #include <cuda_runtime.h>
-#include <math.h>
-#include <stdio.h>
-#include "../../include/loss.h" 
-#include "../../include/utils.h"
+#include <cstdio>
+#include "loss.h"
 
-#define EPSILON 1e-7f
+// logits: (B, K)
+// labels: (B)
+// dlogits: (B, K)  output gradient
+// loss: device scalar (sum of losses)
 
-__global__ void softmax_cross_entropy_fused_kernel(
-    const float* __restrict__ logits,
-    const int* __restrict__ labels,
-    float* __restrict__ d_logits,
-    float* __restrict__ loss,
-    int batch_size,
-    int num_classes
+__global__ void softmax_ce_loss_grad_kernel(
+        const float* __restrict__ logits,
+        const int* __restrict__ labels,
+        float* __restrict__ dlogits,
+        float* __restrict__ loss,
+        int B, int K
 ) {
-    // One thread per sample
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= B) return;
 
-    if (idx < batch_size) {
-        // Pointer to the start of this sample's row
-        const float* row_logits = logits + idx * num_classes;
-        float* row_grads = d_logits + idx * num_classes;
-        int label = labels[idx];
+    int y = labels[b];
 
-        // --- Step 1: Find Max for Numerical Stability  ---
-        float max_val = -1e30f; // Very small number
-        for (int c = 0; c < num_classes; ++c) {
-            if (row_logits[c] > max_val) {
-                max_val = row_logits[c];
-            }
-        }
-
-        // --- Step 2: Compute Sum of Exponentials (Denominator) ---
-        float sum_exp = 0.0f;
-        for (int c = 0; c < num_classes; ++c) {
-            // Subtract max_val to prevent overflow
-            sum_exp += expf(row_logits[c] - max_val);
-        }
-
-        // --- Step 3: Compute Gradients and Loss ---
-        // Gradient of Softmax+CE is simply: (Probability - Target)
-        // Target is 1.0 for the correct class, 0.0 otherwise.
-        
-        float current_loss = 0.0f;
-
-        for (int c = 0; c < num_classes; ++c) {
-            float softmax_prob = expf(row_logits[c] - max_val) / sum_exp;
-            
-            // Calculate gradient term (dZ)
-            // If this is the correct class, subtract 1.0 (P - 1)
-            // Otherwise, it remains (P - 0)
-            float grad = softmax_prob;
-            if (c == label) {
-                grad -= 1.0f;
-                // Calculate Loss only for the correct label
-                // Add EPSILON to prevent log(0)
-                current_loss = -logf(softmax_prob + EPSILON); 
-            }
-
-            // Write gradient to global memory
-            // Normalize by batch size for mean reduction if required by optimizer,
-            // otherwise standard implementation usually passes sum or mean.
-            // Here we store raw gradients; optimizer usually handles learning rate scaling.
-            row_grads[c] = grad / (float)batch_size; 
-        }
-
-        // Accumulate total loss atomically 
-        // Note: For very large batches, block-level reduction before atomicAdd is faster,
-        // but for this project scope, direct atomicAdd is acceptable correctness.
-        atomicAdd(loss, current_loss);
+    // Defensive check: prevent illegal access if label is bad
+    if (y < 0 || y >= K) {
+        for (int j = 0; j < K; ++j) dlogits[b*K + j] = 0.0f;
+        return;
     }
+
+
+    // Find max logit for stability
+    float m = logits[b * K + 0];
+    for (int j = 1; j < K; ++j) {
+        float v = logits[b * K + j];
+        if (v > m) m = v;
+    }
+
+    // Compute sum exp
+    float sum = 0.0f;
+    for (int j = 0; j < K; ++j) {
+        sum += expf(logits[b * K + j] - m);
+    }
+
+    // Compute softmax + gradient
+    float inv = 1.0f / sum;
+    float p_y = 0.0f;
+
+    for (int j = 0; j < K; ++j) {
+        float p = expf(logits[b * K + j] - m) * inv;
+        dlogits[b * K + j] = p;     // store p first
+        if (j == y) p_y = p;
+    }
+
+    // gradient: p - onehot
+    dlogits[b * K + y] -= 1.0f;
+
+    // loss: -log(p_y)
+    // avoid log(0)
+    float eps = 1e-12f;
+    float l = -logf(fmaxf(p_y, eps));
+    atomicAdd(loss, l);
 }
 
 void compute_softmax_loss_gradient(
-    const float* d_logits,
-    const int* d_labels,
-    float* d_dlogits,
-    float* d_loss,
-    int batch_size,
-    int num_classes,
-    int blocksize
+        const float* d_logits,
+        const int* d_labels,
+        float* d_dlogits,
+        float* d_loss,
+        int B, int K,
+        int blocksize,
+        cudaStream_t s
 ) {
-    // Reset loss to 0 on GPU before accumulation
-    cudaMemset(d_loss, 0, sizeof(float));
+    int threads = blocksize;
+    if (threads <= 0 || threads > 1024) threads = 256;
+    int blocks = (B + threads - 1) / threads;
 
-    // Configure Grid
-    int threadsPerBlock = blocksize;
-    int blocksPerGrid = (batch_size + threadsPerBlock - 1) / threadsPerBlock;
-
-    // Launch Fused Kernel 
-    softmax_cross_entropy_fused_kernel<<<blocksPerGrid, threadsPerBlock>>>(
-        d_logits,
-        d_labels,
-        d_dlogits,
-        d_loss,
-        batch_size,
-        num_classes
+    softmax_ce_loss_grad_kernel<<<blocks, threads , 0, s>>>(
+            d_logits, d_labels, d_dlogits, d_loss, B, K
     );
 
-    // Check for launch errors (as per Best Practices)
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        printf("Softmax Kernel Launch Error: %s\n", cudaGetErrorString(err));
+        printf("softmax_ce_loss_grad_kernel Launch Error: %s\n",
+               cudaGetErrorString(err));
     }
 }

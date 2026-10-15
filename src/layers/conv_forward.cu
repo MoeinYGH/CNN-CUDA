@@ -1,24 +1,19 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include "../include/conv_layer.h"
-#include "../../include/tensor.h" // Ensure this includes your struct definition
-#include "../../include/utils.h"
+#include "conv_layer.h"
+#include "tensor.h"
+//#include "/include/utils.h"
 
-/**
- * @brief Baseline Naive Convolution Forward Kernel using Tensor Struct.
- * * One thread per Output Pixel.
- * * Corresponding to Convolution v1 (baseline)[cite: 39].
- */
 __global__ void conv_forward_naive_kernel(
     const Tensor input,
     const Tensor weights,
     const float* __restrict__ bias,
     Tensor output,
     int pad,
-    int stride
+    int stride,
+    int total_elements
 ) {
     // 1. Calculate Global Thread Index
-    int total_elements = numel(output);
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < total_elements) {
@@ -43,12 +38,12 @@ __global__ void conv_forward_naive_kernel(
                     int ih_in = oh * stride - pad + kh;
                     int iw_in = ow * stride - pad + kw;
 
-                    // Boundary Check for Padding [cite: 17]
+                    // Boundary Check for Padding
                     if (ih_in >= 0 && ih_in < input.H && iw_in >= 0 && iw_in < input.W) {
                         
                         // Indexing using NCHW layout
                         int input_idx = ((b * input.C + ic) * input.H + ih_in) * input.W + iw_in;
-                        int weight_idx = ((oc * input.C + ic) * weights.H + kh) * weights.W + kw;
+                        int weight_idx = ((oc * weights.C + ic) * weights.H + kh) * weights.W + kw;
 
                         sum += input.data[input_idx] * weights.data[weight_idx];
                     }
@@ -56,7 +51,7 @@ __global__ void conv_forward_naive_kernel(
             }
         }
 
-        // 4. Add Bias (Bias is per output channel) [cite: 17]
+        // 4. Add Bias (Bias is per output channel)
         if (bias != nullptr) {
             sum += bias[oc];
         }
@@ -66,27 +61,30 @@ __global__ void conv_forward_naive_kernel(
     }
 }
 
-/**
- * @brief Host wrapper using Tensor structs.
- */
 void conv_forward(
-    const Tensor* d_input,
-    const Tensor* d_weights,
-    const float* d_bias,
-    Tensor* d_output,
-    int pad,
-    int stride,
-    int blocksize
+        const Tensor* d_input,
+        const Tensor* d_weights,
+        const float* d_bias,
+        Tensor* d_output,
+        int pad,
+        int stride,
+        int blocksize,
+        cudaStream_t s
 ) {
-    int total_output_elements = numel(*d_output);
+    int total_output_elements = d_output->N * d_output->C * d_output->H * d_output->W;
 
     int threadsPerBlock = blocksize;
+    if (threadsPerBlock <= 0 || threadsPerBlock > 1024) threadsPerBlock = 256;
+
     int blocksPerGrid = (total_output_elements + threadsPerBlock - 1) / threadsPerBlock;
 
-    // Passing the structs by value to the kernel (CUDA handles this by copying the struct to constant memory)
-    conv_forward_naive_kernel<<<blocksPerGrid, threadsPerBlock>>>(
-        *d_input, *d_weights, d_bias, *d_output, pad, stride
+    conv_forward_naive_kernel<<<blocksPerGrid, threadsPerBlock ,0, s>>>(
+            *d_input, *d_weights, d_bias, *d_output, pad, stride, total_output_elements
     );
 
-    check_kernel_launch("Conv Forward Naive");
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("conv_forward_naive_kernel Launch Error: %s\n", cudaGetErrorString(err));
+        return;
+    }
 }

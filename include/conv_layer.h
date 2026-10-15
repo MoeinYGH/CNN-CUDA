@@ -9,7 +9,9 @@ void conv_forward(
     const float* d_bias,
     Tensor* d_output,
     int pad,
-    int stride
+    int stride,
+    int  blocksize,
+    cudaStream_t stream = 0
 );
 
 void conv_backward(
@@ -19,8 +21,10 @@ void conv_backward(
     Tensor& dX,
     Tensor& dW,
     Tensor& db,
+    int K,
     int stride, int pad,
-    int blocksize
+    int blocksize ,
+    cudaStream_t stream = 0
 );
 
 #endif

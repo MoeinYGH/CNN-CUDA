@@ -1,11 +1,19 @@
+#ifndef ACTIVATIONS_H
+#define ACTIVATIONS_H
+
 #pragma once
 #include "tensor.h"
 
 // ReLU forward: Y = max(0, X)
-void relu_forward(const Tensor& X, Tensor& Y, int blocksize);
+void relu_forward( Tensor& X, Tensor& Y, int blocksize,
+                   cudaStream_t stream = 0);
 
 // ReLU backward: dX = dY * (X > 0)
-void relu_backward(const Tensor& X,
-const Tensor& dY,
+void relu_backward( Tensor& X,
+ Tensor& dY,
 Tensor& dX,
-int blocksize);
+int blocksize,
+cudaStream_t stream = 0
+);
+
+#endif

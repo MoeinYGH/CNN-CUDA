@@ -1,3 +1,6 @@
+#ifndef TENSOR_H
+#define TENSOR_H
+
 #pragma once
 
 struct Tensor {
@@ -8,3 +11,4 @@ struct Tensor {
 static inline int numel(const Tensor& t) {
 return t.N * t.C * t.H * t.W;
 }
+#endif

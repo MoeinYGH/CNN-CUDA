@@ -2,11 +2,6 @@
 #include <stdio.h>
 #include "../../include/utils.h"
 
-/**
- * @brief Prints properties of the currently active CUDA device.
- * * Useful for the project report to document hardware constraints 
- * * (e.g., Max Threads per Block, Shared Memory size).
- */
 void print_device_info() {
     int device_id;
     cudaGetDevice(&device_id);
@@ -26,9 +21,6 @@ void print_device_info() {
     printf("-----------------------\n\n");
 }
 
-/**
- * @brief Initializes the device and checks for available GPUs.
- */
 void init_cuda_device() {
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
@@ -36,6 +28,5 @@ void init_cuda_device() {
         fprintf(stderr, "Error: No CUDA capable devices found.\n");
         exit(EXIT_FAILURE);
     }
-    // Set to device 0 by default
     CHECK_CUDA(cudaSetDevice(0));
 }

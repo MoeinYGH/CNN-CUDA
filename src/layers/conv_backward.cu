@@ -1,20 +1,15 @@
 #include <cuda_runtime.h>
 #include "tensor.h"
+#include <stdio.h>
 #include "conv_layer.h"
-// Index helpers (NCHW and weight layout)
+
 __device__ __forceinline__ int idx4_nchw(int n,int c,int h,int w,int C,int H,int W){
     return ((n*C + c)*H + h)*W + w; //turn into flat indexing for tensor store
 }
 __device__ __forceinline__ int idx4_w(int co,int ci,int ky,int kx,int Cin,int K){
     return ((co*Cin + ci)*K + ky)*K + kx; // [Cout,Cin,K,K]
-    //indexing for weight store
 }
 
-// ------------------------------------------------------------
-// db[co] = sum_{b,ho,wo} dY[b,co,ho,wo]
-// dY: [B,Cout,Hout,Wout]
-// db: [Cout]
-// ------------------------------------------------------------
 __global__ void conv_db_kernel(const float* __restrict__ dY, //one thread per output channel
                                float* __restrict__ db,
                                int B, int Cout, int Hout, int Wout)
@@ -34,14 +29,6 @@ __global__ void conv_db_kernel(const float* __restrict__ dY, //one thread per ou
     db[co] = acc;
 }
 
-// ------------------------------------------------------------
-// dW[co,ci,ky,kx] = sum_{b,ho,wo} dY[b,co,ho,wo] * X[b,ci,iy,ix]
-// iy = ho*stride - pad + ky
-// ix = wo*stride - pad + kx
-// X:  [B,Cin,Hin,Win]
-// dY: [B,Cout,Hout,Wout]
-// dW: [Cout,Cin,K,K]
-// ------------------------------------------------------------
 __global__ void conv_dW_kernel(const float* __restrict__ X, //one thread per weight element
                                const float* __restrict__ dY,
                                float* __restrict__ dW,
@@ -81,15 +68,6 @@ __global__ void conv_dW_kernel(const float* __restrict__ X, //one thread per wei
     dW[dw_idx] = acc;
 }
 
-// ------------------------------------------------------------
-// dX[b,ci,iy,ix] = sum_{co,ky,kx} dY[b,co,ho,wo] * W[co,ci,ky,kx]
-// where ho,wo are the output coords that correspond to (iy,ix,ky,kx):
-// ho = (iy + pad - ky) / stride  and must be integer
-// wo = (ix + pad - kx) / stride
-// X:  [B,Cin,Hin,Win]  (we compute dX same shape)
-// W:  [Cout,Cin,K,K]
-// dY: [B,Cout,Hout,Wout]
-// ------------------------------------------------------------
 __global__ void conv_dX_kernel(const float* __restrict__ dY, //one thread per input element
                                const float* __restrict__ W,
                                float* __restrict__ dX,
@@ -132,24 +110,15 @@ __global__ void conv_dX_kernel(const float* __restrict__ dY, //one thread per in
     dX[dx_idx] = acc;
 }
 
-// ------------------------------------------------------------
-// Host wrapper (call from your layer backward)
-// Assumes Tensor layout:
-//   X:  [B,Cin,Hin,Win]
-//   dY: [B,Cout,Hout,Wout]
-//   W:  [Cout,Cin,K,K] stored as Tensor with N=Cout,C=Cin,H=K,W=K
-//   dX: same as X
-//   dW: same as W
-//   db: [Cout] stored as Tensor with N=1,C=Cout,H=1,W=1 (or any equivalent)
-// ------------------------------------------------------------
-void conv_backward(const Tensor& X, //launches three kernels
+void conv_backward(const Tensor& X,
                    const Tensor& W,
                    const Tensor& dY,
                    Tensor& dX,
                    Tensor& dW,
                    Tensor& db,
                    int K, int stride, int pad,
-                   int blocksize)
+                   int blocksize,
+                   cudaStream_t s)
 {
     int B   = X.N;
     int Cin = X.C;
@@ -166,26 +135,38 @@ void conv_backward(const Tensor& X, //launches three kernels
     // db
     {
         int blocks = (Cout + threads - 1) / threads;
-        conv_db_kernel<<<blocks, threads>>>(dY.data, db.data, B, Cout, Hout, Wout);
+        conv_db_kernel<<<blocks, threads , 0, s>>>(dY.data, db.data, B, Cout, Hout, Wout);
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("conv_db_kernel Launch Error: %s\n", cudaGetErrorString(err));
     }
 
     // dW
     {
         int total = Cout * Cin * K * K;
         int blocks = (total + threads - 1) / threads;
-        conv_dW_kernel<<<blocks, threads>>>(X.data, dY.data, dW.data,
+        conv_dW_kernel<<<blocks, threads , 0, s>>>(X.data, dY.data, dW.data,
                                             B, Cin, Hin, Win,
                                             Cout, Hout, Wout,
                                             K, stride, pad);
+    }
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("conv_dW_kernel Launch Error: %s\n", cudaGetErrorString(err));
     }
 
     // dX
     {
         int total = B * Cin * Hin * Win;
         int blocks = (total + threads - 1) / threads;
-        conv_dX_kernel<<<blocks, threads>>>(dY.data, W.data, dX.data,
+        conv_dX_kernel<<<blocks, threads , 0, s>>>(dY.data, W.data, dX.data,
                                             B, Cin, Hin, Win,
                                             Cout, Hout, Wout,
                                             K, stride, pad);
+    }
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("conv_dX_kernel Launch Error: %s\n", cudaGetErrorString(err));
     }
 }

@@ -7,4 +7,5 @@ void sgd_update_tensor(Tensor& param,
 Tensor& grad,
 float lr,
 bool zero_grad,
-int blocksize);
+int blocksize,
+cudaStream_t stream = 0);
